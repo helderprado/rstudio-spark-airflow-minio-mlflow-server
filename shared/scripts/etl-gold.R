@@ -9,7 +9,9 @@ spark_disconnect_all()
 conf <- spark_config()
 
 # alterar memória utilizada pelo núcleo spark
-conf$spark.driver.memory <- "16g"
+conf$spark.driver.memory <- "6"
+conf$spark.executor.memory <- "6G"
+conf$spark.driver.maxResultSize <- "6g"
 
 # conectar ao spark
 sc <- spark_connect(master = "local", config = conf)

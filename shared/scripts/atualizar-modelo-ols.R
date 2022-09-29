@@ -5,6 +5,8 @@ library(carrier)
 library(mlflow)
 library(dplyr)
 library(reticulate)
+library(glue)
+library(stats)
 
 use_condaenv('mlflow')
 
@@ -14,9 +16,17 @@ Sys.setenv(MLFLOW_BIN="/usr/local/airflow/.local/share/r-miniconda/envs/mlflow/b
 # alterar caminho da variável de ambiente do python
 Sys.setenv(MLFLOW_PYTHON_BIN="/usr/local/airflow/.local/share/r-miniconda/envs/mlflow/bin/python")
 
-path <- "/usr/local/spark/app/@bronze/2017.csv"
+anos <- list.files('/usr/local/spark/app/@gold/airline.parquet/')
 
-df <- read.df("/usr/local/spark/app/@bronze/2017.csv", "csv")
+elementos <- c()
+
+for (ano in anos) {
+  for (mes in list.files(glue('/usr/local/spark/app/@gold/airline.parquet/{ano}'))) {
+        elementos <- c(elementos,paste('/usr/local/spark/app/@gold/airline.parquet',ano,mes,sep="/"))
+  }
+}
+
+paths <- tail(elementos,3)
 
 # Desconectar alguma conexão ativa com o spark
 spark_disconnect_all()
@@ -25,13 +35,15 @@ spark_disconnect_all()
 conf <- spark_config()
 
 # alterar memória utilizada pelo núcleo spark
-conf$spark.driver.memory <- "16g"
+conf$spark.driver.memory <- "6"
+conf$spark.executor.memory <- "6G"
+conf$spark.driver.maxResultSize <- "6g"
 
 # conectar ao spark
 sc <- spark_connect(master = "local", config = conf)
 
 #ler o arquivo csv e atribuir o dataframe
-df <- spark_read_csv(sc, name = "df",  path = path)
+df <- spark_read_parquet(sc, name = "df",  path = paths)
 
 # verificar as 5 primeiras linhas do dataset
 head(df)
@@ -43,6 +55,8 @@ df <- select(df, AIR_TIME, DISTANCE)
 df <- df %>% 
   na.omit
 
+df <- collect(df)
+
 # inicializar o mlflow
 mlflow_set_tracking_uri('http://mlflow:5000')
 
@@ -51,37 +65,32 @@ mlflow_set_experiment("/regressao-linear")
 
 with(mlflow_start_run(), {
   
+  # fazer o log dos parâmetros do modelo
+  mlflow_log_param("fórmula", "AIR_TIME ~ DISTANCE")
+  
   # refazer o modelo dentro do encapsulamento do mlflow
-  airline_lm <- ml_linear_regression(df, AIR_TIME ~ DISTANCE)
+  airline_lm <- lm(formula=AIR_TIME ~ DISTANCE, data=df)
+  
+  # sumário do modelo
+  summary <- summary(airline_lm)
   
   # valores fitted do modelo
-  fitted <- ml_predict(airline_lm, df)
+  fitted <- predict(airline_lm, df)
   
-  # armazenar o rmse, mae e r2
-  rmse <- airline_lm$summary$root_mean_squared_error
-  mae <- airline_lm$summary$mean_squared_error
-  r2 <- airline_lm$summary$r2
+  # armazenar o r2 e r2 ajsutado
+  r2 <- summary$r.squared
+  r2_ajustado <- summary$adj.r.squared
   
   # printar mensagens no log do mlflow
-  message("  RMSE: ", rmse)
-  message("  MAE: ", mae)
-  message("  R2: ", r2)
+  message("  r2: ", r2)
+  message("  r2_ajustado: ", r2_ajustado)
   
   # logar as métricas do run atual do mlflow
-  mlflow_log_metric("rmse", rmse)
   mlflow_log_metric("r2", r2)
-  mlflow_log_metric("mae", mae)
+  mlflow_log_metric("r2_ajustado", r2_ajustado)
   
-  packaged_airline_lm <- carrier::crate(
-    function(x) sparklyr::ml_predict(airline_lm),
-    airline_lm = airline_lm
-  )
-  
+  packaged_airline_lm <- carrier::crate(~ stats::predict.lm(object=!!airline_lm, .x), airline_lm)
+
   mlflow_log_model(packaged_airline_lm, "airline")
+  
 })
-
-predict <- mlflow_load_model('models:/airline/production')
-
-predict(df)
-
-spark_disconnect(sc)
