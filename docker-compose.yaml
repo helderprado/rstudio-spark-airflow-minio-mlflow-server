@@ -1,0 +1,208 @@
+version: "3.6"
+
+services:
+  rstudio:
+    build:
+      context: ./rstudio
+      dockerfile: Dockerfile
+    container_name: rstudio
+    restart: on-failure
+    volumes:
+      - type: volume
+        source: rstudio
+        target: /home/rstudio
+        volume:
+          no-copy: true
+      - type: bind
+        source: ./shared
+        target: /home/rstudio/shared
+      - type: volume
+        source: r_libs
+        target: /usr/local/lib/R
+        volume:
+          no-copy: true
+    environment:
+      - PASSWORD=rstudio1
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - MLFLOW_S3_ENDPOINT_URL=http://s3:9000
+    ports:
+      - "8787:8787"
+    networks:
+      - server
+
+  s3:
+    image: minio/minio:RELEASE.2021-11-24T23-19-33Z
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${AWS_ACCESS_KEY_ID}
+      - MINIO_ROOT_PASSWORD=${AWS_SECRET_ACCESS_KEY}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_volume:/data
+    networks:
+      - server
+
+  db:
+    image: mysql/mysql-server:5.7.28
+    restart: unless-stopped
+    container_name: mlflow_db
+    expose:
+      - "3306"
+    environment:
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - db_volume:/var/lib/mysql
+    networks:
+      - server
+
+  mlflow:
+    container_name: tracker_mlflow
+    image: tracker_ml
+    restart: unless-stopped
+    build:
+      context: ./mlflow
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_REGION}
+      - MLFLOW_S3_ENDPOINT_URL=http://s3:9000
+    entrypoint: bash ./wait-for-it.sh db:3306 -t 90 -- mlflow server --backend-store-uri mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE} --default-artifact-root s3://${AWS_BUCKET_NAME}/ -h 0.0.0.0
+    networks:
+      - server
+
+  create_s3_buckets:
+    image: minio/mc
+    depends_on:
+      - "s3"
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc alias set minio http://s3:9000 '${AWS_ACCESS_KEY_ID}' '${AWS_SECRET_ACCESS_KEY}') do echo '...waiting...' && sleep 1; done;
+      /usr/bin/mc mb minio/mlflow;
+      exit 0;
+      "
+    networks:
+      - server
+
+  postgres:
+    image: postgres:9.6
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    volumes:
+      - /tmp/postgres-data:/var/lib/postgresql/data
+    networks:
+      - server
+
+  airflow-webserver:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    restart: always
+    networks:
+      - server
+    depends_on:
+      - postgres
+    environment:
+      - LOAD_EX=n
+      - EXECUTOR=Local
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_REGION}
+      - MLFLOW_S3_ENDPOINT_URL=http://s3:9000
+    volumes:
+      - ./shared:/usr/local/airflow/dags #DAG folder
+      - ./shared:/usr/local/spark/app #Spark Scripts (Must be the same path in airflow and Spark Cluster)
+      - ./shared:/usr/local/spark/resources #Resources folder (Must be the same path in airflow and Spark Cluster)
+    ports:
+      - "8282:8282"
+    command: webserver
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f /usr/local/airflow/airflow-webserver.pid ]"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+
+  spark-master:
+    image: cluster-apache-spark:3.0.2
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    ports:
+      - "9090:8080"
+      - "7077:7077"
+    # volumes:
+    #   - ./apps:/opt/spark-apps
+    #   - ./data:/opt/spark-data
+    environment:
+      - SPARK_LOCAL_IP=spark-master
+      - SPARK_WORKLOAD=master
+    networks:
+      - server
+
+  spark-worker-a:
+    image: cluster-apache-spark:3.0.2
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    ports:
+      - "9091:8080"
+      - "7000:7000"
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - SPARK_WORKER_CORES=1
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_DRIVER_MEMORY=1G
+      - SPARK_EXECUTOR_MEMORY=1G
+      - SPARK_WORKLOAD=worker
+      - SPARK_LOCAL_IP=spark-worker-a
+    # volumes:
+    #   - ./apps:/opt/spark-apps
+    #   - ./data:/opt/spark-data
+    networks:
+      - server
+
+  spark-worker-b:
+    image: cluster-apache-spark:3.0.2
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    ports:
+      - "9092:8080"
+      - "7001:7000"
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - SPARK_WORKER_CORES=1
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_DRIVER_MEMORY=1G
+      - SPARK_EXECUTOR_MEMORY=1G
+      - SPARK_WORKLOAD=worker
+      - SPARK_LOCAL_IP=spark-worker-b
+    # volumes:
+    #   - ./apps:/opt/spark-apps
+    #   - ./data:/opt/spark-data
+    networks:
+      - server
+
+networks:
+  server:
+
+volumes:
+  db_volume:
+  minio_volume:
+  r_libs:
+  rstudio:
