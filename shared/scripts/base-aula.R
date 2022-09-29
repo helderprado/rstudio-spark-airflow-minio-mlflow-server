@@ -90,10 +90,7 @@ with(mlflow_start_run(), {
   mlflow_log_metric("r2", r2)
   mlflow_log_metric("r2_ajustado", r2_ajustado)
   
-  packaged_airline_lm <- carrier::crate(
-    function(x) stats::predict.lm(airline_lm, .x),
-    airline_lm = airline_lm
-  )
+  packaged_airline_lm <- carrier::crate(~ stats::predict.lm(object=!!airline_lm, .x), airline_lm)
   
   mlflow_log_model(packaged_airline_lm, "airline")
   
