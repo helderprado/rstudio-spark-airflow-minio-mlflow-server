@@ -7,19 +7,17 @@ spark_disconnect_all()
 # Set configuration:
 conf <- spark_config()
 
+conf$sparklyr.gateway.start.timeout <- 60 * 5
+
 # Bypass the JAR's issues:
 
 conf$sparklyr.defaultPackages <- c("com.amazonaws:aws-java-sdk-bundle:1.11.819",
                                    "org.apache.hadoop:hadoop-aws:3.2.3",
                                    "org.apache.hadoop:hadoop-common:3.2.3")
 
-
 # alterar memória utilizada pelo núcleo spark
-conf$spark.driver.memory <- "6"
-conf$spark.executor.memory <- "6G"
-conf$spark.driver.maxResultSize <- "6g"
-
-options(sparklyr.verbose = TRUE)
+conf$`sparklyr.shell.driver-memory` <- '8G'
+conf$`sparklyr.shell.executor-memory` <- '8G'
 
 # conectar ao spark
 sc <- spark_connect(master = "local", config = conf, spark_home="/usr/local/airflow/spark/spark-3.3.0-bin-hadoop3")

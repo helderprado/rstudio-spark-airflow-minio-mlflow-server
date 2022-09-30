@@ -6,6 +6,7 @@ from airflow.operators.dummy_operator import DummyOperator
 args = {
     'owner': 'Helder',
     'start_date': airflow.utils.dates.days_ago(2),
+    'retries': 2,
 }
 
 dag = DAG(
