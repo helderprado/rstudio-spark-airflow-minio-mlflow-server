@@ -16,36 +16,77 @@ Sys.setenv(MLFLOW_BIN="/home/rstudio/.local/share/r-miniconda/envs/mlflow/bin/ml
 # alterar caminho da variável de ambiente do python
 Sys.setenv(MLFLOW_PYTHON_BIN="/home/rstudio/.local/share/r-miniconda/envs/mlflow/bin/python")
 
-anos <- list.files('shared/@gold/airline.parquet/')
-
-elementos <- c()
-
-for (ano in anos) {
-  for (mes in list.files(glue('shared/@gold/airline.parquet/{ano}'))) {
-    elementos <- c(elementos,paste('shared/@gold/airline.parquet',ano,mes,sep="/"))
-  }
-}
-
-paths <- tail(elementos,3)
-
-paths
-
 # Desconectar alguma conexão ativa com o spark
 spark_disconnect_all()
 
-# Definir configurações iniciais
+# Set configuration:
 conf <- spark_config()
+
+# Bypass the JAR's issues:
+conf$sparklyr.defaultPackages <- c("com.amazonaws:aws-java-sdk-bundle:1.11.819",
+                                   "org.apache.hadoop:hadoop-aws:3.2.3",
+                                   "org.apache.hadoop:hadoop-common:3.2.3")
+
 
 # alterar memória utilizada pelo núcleo spark
 conf$spark.driver.memory <- "6"
 conf$spark.executor.memory <- "6G"
 conf$spark.driver.maxResultSize <- "6g"
 
-# conectar ao spark
-sc <- spark_connect(master = "local", config = conf)
+options(sparklyr.log.console = TRUE)
 
-#ler o arquivo csv e atribuir o dataframe
-df <- spark_read_parquet(sc, name = "df",  path = paths)
+# conectar ao spark
+sc <- spark_connect(master = "local", config = conf, spark_home="/home/rstudio/spark/spark-3.3.0-bin-hadoop3")
+
+# atribuir o contexto do spark papra iniciar as configurações do s3
+ctx <- spark_context(sc)
+
+jsc <- invoke_static(sc, 
+                     "org.apache.spark.api.java.JavaSparkContext", 
+                     "fromSparkContext", 
+                     ctx)
+
+# adicionar as configurações para acessar os buckets do minio
+hconf <- jsc %>% invoke("hadoopConfiguration")
+hconf %>% invoke("set", "fs.s3a.access.key", "admin")
+hconf %>% invoke("set", "fs.s3a.secret.key", "sample_key")
+hconf %>% invoke("set", "fs.s3a.endpoint", "s3:9000")
+hconf %>% invoke("set", "fs.s3a.path.style.access", "true")
+hconf %>% invoke("set", "fs.s3a.connection.ssl.enabled", "false")
+hconf %>% invoke("set", "fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
+
+# verificar o tempo de processamento para coletar os dados do dataset do ano de 2017
+system.time(df_2017 <- spark_read_parquet(sc, name="df", path="s3a://gold/airline.parquet/YEAR=2017"))
+
+# contagem de linhas
+sdf_nrow(df_2017)
+
+# verificar o tempo de processamento para coletar os dados do dataset do ano de 2017 e mês 10
+system.time(df_2017_10 <- spark_read_parquet(sc, name="df", path="s3a://gold/airline.parquet/YEAR=2017/MONTH=10"))
+
+# contagem de linhas
+sdf_nrow(df_2017_10)
+
+# ler o dataset utilizando o spark diretamente no bucket s3
+df <- spark_read_csv(sc, name="df", path="s3a://bronze/airline", header=TRUE, infer_schema=TRUE)
+
+# contagem do número de linhas do dataset
+sdf_nrow(df)
+
+# visualizar as variáveis em formato de linha com as observações
+glimpse(df)
+
+# coletar a última data da coluna FL_DATE
+ultima_data <- df %>% dplyr::pull(FL_DATE) %>% max()
+
+# coletar a data que é 3 meses antes à última data
+tres_meses_antes <- seq(ultima_data, length = 2, by = "-3 months")[2]
+
+# filtrar o dataset no período entre essas duas datas
+df <- df %>% filter(
+  FL_DATE >= tres_meses_antes,
+  FL_DATE <= ultima_data
+)
 
 # verificar as 5 primeiras linhas do dataset
 head(df)
@@ -57,6 +98,7 @@ df <- select(df, AIR_TIME, DISTANCE)
 df <- df %>% 
   na.omit
 
+# trazer o dataframe para o driver
 df <- collect(df)
 
 # inicializar o mlflow

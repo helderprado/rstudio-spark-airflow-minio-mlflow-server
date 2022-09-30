@@ -8,7 +8,7 @@ args = {
 }
 
 dag = DAG(
-    dag_id='elt-silver',
+    dag_id='etl-silver',
     default_args=args,
     schedule_interval=None
 )
